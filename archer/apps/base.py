@@ -24,6 +24,8 @@ class Option:
     digits: int = 0
     # Irrelevant on this platform; still shown if the user has set it.
     hidden: bool = False
+    # Shorter title for the option's own category page; the key is used elsewhere.
+    label: str = ""
 
 
 @dataclass
@@ -56,7 +58,11 @@ class ConfigApp:
         """The editor for this app's config format (see configfile.py)."""
         return KeyValueConfig(path)
 
-    def load_options(self) -> list[Option]:
+    def load_options(self, cfg) -> list[Option]:
+        """All options; cfg is the loaded config, for apps whose options depend on it.
+
+        May also set self.categories, for apps whose pages depend on the config.
+        """
         raise NotImplementedError
 
     def build_page(self, category, state, on_change):
@@ -70,8 +76,8 @@ class ConfigApp:
     def previews(self) -> list[Preview]:
         return []
 
-    def validate(self, path: Path) -> str | None:
-        """Check a candidate config file; return an error message or None."""
+    def validate(self, candidate: Path, target: Path) -> str | None:
+        """Check candidate, the new contents for target; return an error or None."""
         return None
 
     def apply(self) -> str:

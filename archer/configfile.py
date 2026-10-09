@@ -60,6 +60,10 @@ class KeyValueConfig:
     def mark_saved(self):
         self._saved = self.render()
 
+    def outputs(self):
+        """[(path, new contents)] for every file that needs writing."""
+        return [(self.path, self.render())]
+
     def keys(self):
         return list(parse_text("\n".join(self.lines)))
 

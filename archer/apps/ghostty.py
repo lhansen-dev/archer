@@ -97,7 +97,7 @@ class Ghostty(ConfigApp):
         modern = self.config_dir() / "config.ghostty"
         return modern if modern.exists() else self.config_dir() / "config"
 
-    def load_options(self):
+    def load_options(self, cfg):
         fonts = sorted({line for line in _ghostty("+list-fonts").splitlines()
                         if line and not line.startswith(" ")}, key=str.lower)
         themes = [re.sub(r" \((resources|user)\)$", "", line)
@@ -169,7 +169,7 @@ class Ghostty(ConfigApp):
                                          "font-family"}), self._color_preview),
         ]
 
-    def validate(self, path):
+    def validate(self, path, target):
         result = subprocess.run(["ghostty", "+validate-config", f"--config-file={path}"],
                                 capture_output=True, text=True)
         if result.returncode == 0:

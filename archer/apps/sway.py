@@ -197,7 +197,7 @@ class Sway(ConfigApp):
     def open_config(self, path):
         return SwayConfig(path, fallback="/etc/sway/config")
 
-    def load_options(self):
+    def load_options(self, cfg):
         options = []
         for category, group in [("Appearance", APPEARANCE), ("Behavior", BEHAVIOR)]:
             for opt in group:
@@ -296,7 +296,7 @@ class Sway(ConfigApp):
                         f'<span background="{border}"> </span>')
         return f'<span font_desc="{GLib.markup_escape_text(font)}">' + "\n\n".join(rows) + "</span>"
 
-    def validate(self, path):
+    def validate(self, path, target):
         result = subprocess.run(["sway", "-C", "-c", str(path)], capture_output=True, text=True,
                                 timeout=30)
         output = result.stdout + result.stderr

@@ -28,7 +28,7 @@ class AppState:
     def __init__(self, app):
         self.app = app
         self.cfg = app.open_config(app.config_path())
-        self.options = app.load_options()
+        self.options = app.load_options(self.cfg)
         self.by_key = {opt.key: opt for opt in self.options}
         self.previews = app.previews()
 
@@ -57,24 +57,33 @@ class AppState:
         return [opt for opt in self.options if self.cfg.get(opt.key) is not None]
 
     def save(self):
-        """Validate and write the config. Returns an error message or None."""
-        # Write through symlinks (e.g. a config linked from a dotfiles repo).
-        path = self.cfg.path.resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".archer")
+        """Validate and write every changed file. Returns an error message or None.
+
+        Nothing is written unless all files pass validation.
+        """
+        # Resolve symlinks so configs linked from a dotfiles repo are written through.
+        outputs = [(Path(path).resolve(), text) for path, text in self.cfg.outputs()]
+        pending = []
         try:
-            with os.fdopen(fd, "w") as f:
-                f.write(self.cfg.render())
-            if error := self.app.validate(Path(tmp)):
-                return error
-            if path.exists():
-                shutil.copy2(path, path.with_name(path.name + ".bak"))
-                shutil.copymode(path, tmp)
-            os.replace(tmp, path)
-            tmp = None
+            for path, text in outputs:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.",
+                                           suffix=".archer")
+                pending.append((path, Path(tmp)))
+                with os.fdopen(fd, "w") as f:
+                    f.write(text)
+            for path, tmp in pending:
+                if error := self.app.validate(tmp, path):
+                    return f"{path.name}: {error}" if len(pending) > 1 else error
+            for path, tmp in pending:
+                if path.exists():
+                    shutil.copy2(path, path.with_name(path.name + ".bak"))
+                    shutil.copymode(path, tmp)
+                os.replace(tmp, path)
+            pending = []
         finally:
-            if tmp:
-                os.unlink(tmp)
+            for _, tmp in pending:
+                tmp.unlink(missing_ok=True)
         self.cfg.mark_saved()
         return None
 
@@ -207,8 +216,8 @@ class ArcherWindow(Adw.ApplicationWindow):
         self.toasts.set_child(page)
         return page
 
-    def _add_option(self, group, state, opt):
-        row = OptionRow(opt, state, lambda key: self._on_option_changed(state, key))
+    def _add_option(self, group, state, opt, title=None):
+        row = OptionRow(opt, state, lambda key: self._on_option_changed(state, key), title)
         group.add(row.widget)
         self.rows.append(row)
 
@@ -246,7 +255,7 @@ class ArcherWindow(Adw.ApplicationWindow):
             title=category if previews else "",
             description=str(state.cfg.path) if category == MODIFIED else "")
         for opt in options:
-            self._add_option(group, state, opt)
+            self._add_option(group, state, opt, opt.label if category != MODIFIED else None)
         if len(options) <= 3:  # e.g. Keybindings: open the editors straight away
             for row in self.rows:
                 if isinstance(row.widget, Adw.ExpanderRow):

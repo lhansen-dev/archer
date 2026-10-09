@@ -27,8 +27,9 @@ class OptionRow:
     on_change(key) is called after every edit.
     """
 
-    def __init__(self, opt, state, on_change):
+    def __init__(self, opt, state, on_change, title=None):
         self.opt, self.state, self.on_change = opt, state, on_change
+        self.title = title or opt.key
         self._updating = False
         self._syncing = False
         self.kind = self._resolve_kind()
@@ -72,6 +73,8 @@ class OptionRow:
             return "list"
         if kind == "bool" and user and user[0] not in ("true", "false"):
             return "text"
+        if kind == "number" and not user and not self.opt.defaults[0]:
+            return "text"  # unset with no default: a spin button can't show "nothing"
         if kind == "number" and user and not NUMBER_RE.fullmatch(user[0]):
             return "text"  # e.g. window-padding-x = 4,8
         return kind
@@ -112,7 +115,7 @@ class OptionRow:
     # -- kinds ------------------------------------------------------------
 
     def _build_bool(self):
-        row = Adw.SwitchRow(title=self.opt.key, subtitle=summary(self.opt.doc))
+        row = Adw.SwitchRow(title=self.title, subtitle=summary(self.opt.doc))
         row.connect("notify::active",
                     lambda r, _: self.commit(["true" if r.get_active() else "false"]))
         return row
@@ -124,7 +127,7 @@ class OptionRow:
         default = self.opt.defaults[0]
         self.default_label = f"Default ({default})" if default else "Default"
         self.model = Gtk.StringList.new([self.default_label, *self.opt.choices])
-        row = Adw.ComboRow(title=self.opt.key, subtitle=summary(self.opt.doc), model=self.model)
+        row = Adw.ComboRow(title=self.title, subtitle=summary(self.opt.doc), model=self.model)
         if len(self.opt.choices) > 12:
             row.set_enable_search(True)
             row.set_expression(Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
@@ -153,7 +156,7 @@ class OptionRow:
         opt = self.opt
         adjustment = Gtk.Adjustment(lower=opt.minimum, upper=opt.maximum,
                                     step_increment=opt.step, page_increment=opt.step * 10)
-        row = Adw.SpinRow(title=opt.key, subtitle=summary(opt.doc), adjustment=adjustment,
+        row = Adw.SpinRow(title=self.title, subtitle=summary(opt.doc), adjustment=adjustment,
                           digits=opt.digits)
         row.connect("notify::value",
                     lambda r, _: self.commit([format_number(r.get_value(), opt.digits)]))
@@ -167,7 +170,7 @@ class OptionRow:
         self.widget.set_value(value)
 
     def _build_text(self):
-        row = Adw.EntryRow(title=self.opt.key, tooltip_text=summary(self.opt.doc))
+        row = Adw.EntryRow(title=self.title, tooltip_text=summary(self.opt.doc))
         row.connect("changed", self._on_text)
         return row
 
@@ -211,7 +214,7 @@ class OptionRow:
             self._syncing = False
 
     def _build_list(self):
-        row = Adw.ExpanderRow(title=self.opt.key, subtitle=summary(self.opt.doc))
+        row = Adw.ExpanderRow(title=self.title, subtitle=summary(self.opt.doc))
         self.buffer = Gtk.TextBuffer()
         self.buffer.connect("changed", self._on_list_changed)
         view = Gtk.TextView(buffer=self.buffer, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,

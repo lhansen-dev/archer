@@ -2,8 +2,9 @@
 
 from .ghostty import Ghostty
 from .sway import Sway
+from .waybar import Waybar
 
-ALL_APPS = [Ghostty(), Sway()]
+ALL_APPS = [Ghostty(), Sway(), Waybar()]
 
 
 def available_apps():

@@ -87,6 +87,10 @@ class SwayConfig:
     def mark_saved(self):
         self._saved = self.render()
 
+    def outputs(self):
+        """[(path, new contents)] for every file that needs writing."""
+        return [(self.path, self.render())]
+
     # -- option access by command prefix ---------------------------------
 
     def _matches(self, key_tokens):

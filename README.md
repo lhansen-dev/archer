@@ -13,6 +13,12 @@ A personal GTK4/libadwaita tool for tweaking application configs on Arch.
   line-by-line editors for keybindings (including modes), window rules,
   startup commands and variables. Saving validates with `sway -C`, keeps a
   `config.bak`, and runs `swaymsg reload`.
+- **Waybar**: bar settings, module layout, a page per module (built from your
+  config plus each module's common options), and a Style page for fonts and
+  a palette of every color in style.css (change one, it's replaced
+  everywhere). Comments and formatting in the JSONC config are preserved.
+  Saving checks the JSON and the CSS syntax, keeps `.bak` copies, and reloads
+  Waybar (SIGUSR2).
 
 Edits only rewrite the lines that changed: comments, ordering, blocks and
 column alignment in your config are preserved. Symlinked configs (e.g. from a
