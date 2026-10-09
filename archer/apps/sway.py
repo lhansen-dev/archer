@@ -3,17 +3,19 @@
 Sway has no machine-readable option list, so the settings here are curated
 from sway(5), sway-input(5) and sway-output(5). Displays and input devices
 come from the running session via swaymsg. Keybindings, window rules,
-startup commands and variables are edited line by line.
+startup commands and variables are edited line by line. The Idle page
+edits the swayidle command started from the config.
 """
 
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
-from gi.repository import GLib
+from gi.repository import Adw, GLib, Gtk
 
 from ..rows import LineSpec, LinesGroup
 from ..swayconfig import SwayConfig
@@ -173,6 +175,193 @@ EXEC = _regex_spec("command", ["Command"], r"^exec\s+(?!--)(.+)$", "exec {}")
 EXEC_ALWAYS = _regex_spec("command", ["Command"], r"^exec_always\s+(.+)$", "exec_always {}")
 
 
+# -- idle (swayidle) ------------------------------------------------------
+
+SCREENSAVER = "~/.local/bin/screensaver-launch"
+SCREENSAVER_FONT_SIZE = 20  # the launcher's default
+FONT_SIZE_RE = re.compile(r"\s*--font-size[ =](\d+)")
+LOCK = "swaylock -f -c 1e1e2e"
+# (label, doc, matches(command), command, resume command, default minutes)
+IDLE_TIMEOUTS = [
+    ("Screensaver", "Minutes idle before the screensaver starts. Any input closes it.",
+     lambda cmd: "screensaver" in cmd, SCREENSAVER, f"{SCREENSAVER} stop", 5),
+    ("Lock screen", "Minutes idle before the screen locks.",
+     lambda cmd: "swaylock" in cmd, LOCK, None, 30),
+    ("Turn off displays", "Minutes idle before the displays power off.",
+     lambda cmd: "power off" in cmd or "dpms off" in cmd,
+     'swaymsg "output * power off"', 'swaymsg "output * power on"', 120),
+]
+# swayidle events that take a command but no timeout
+IDLE_EVENTS = {"before-sleep", "after-resume", "lock", "unlock"}
+
+
+def _parse_swayidle(body):
+    """Split `exec swayidle ...` into (flags, events).
+
+    Events are dicts: {"event": "timeout", "seconds", "command", "resume"}, or
+    {"event": <name>, "command"}; idlehint is kept as {"event", "seconds"}.
+    """
+    try:
+        tokens = shlex.split(body)
+    except ValueError:
+        return None
+    if tokens[:2] != ["exec", "swayidle"]:
+        return None
+    flags, events, i = [], [], 2
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-"):
+            flags.append(tok)
+            i += 1
+        elif tok == "timeout" and i + 2 < len(tokens):
+            event = {"event": tok, "seconds": tokens[i + 1], "command": tokens[i + 2],
+                     "resume": None}
+            i += 3
+            if i + 1 < len(tokens) and tokens[i] == "resume":
+                event["resume"] = tokens[i + 1]
+                i += 2
+            events.append(event)
+        elif tok in IDLE_EVENTS and i + 1 < len(tokens):
+            events.append({"event": tok, "command": tokens[i + 1]})
+            i += 2
+        elif tok == "idlehint" and i + 1 < len(tokens):
+            events.append({"event": tok, "seconds": tokens[i + 1]})
+            i += 2
+        else:
+            return None  # something we don't understand; leave the line alone
+    return flags, events
+
+
+def _format_swayidle(flags, events):
+    parts = [" ".join(["exec swayidle", *flags])]
+    for e in events:
+        if e["event"] == "timeout":
+            parts.append(f"    timeout {e['seconds']} {shlex.quote(e['command'])}")
+            if e["resume"]:
+                parts.append(f"         resume  {shlex.quote(e['resume'])}")
+        elif e["event"] == "idlehint":
+            parts.append(f"    idlehint {e['seconds']}")
+        else:
+            parts.append(f"    {e['event']} {shlex.quote(e['command'])}")
+    return " \\\n".join(parts)
+
+
+class IdleGroup:
+    """Timeouts for the swayidle command started with `exec swayidle`."""
+
+    def __init__(self, cfg, on_change):
+        self.cfg, self.on_change = cfg, on_change
+        self.widget = Adw.PreferencesGroup(
+            title="Idle", description="Edits the swayidle command under Startup. "
+                                      "Takes effect the next time you log in.")
+        line, parsed = self._find()
+        if line is not None and parsed is None:
+            self.widget.set_description("The swayidle command under Startup couldn't be "
+                                        "parsed; edit it there.")
+            return
+        events = parsed[1] if parsed else []
+        screensaver = next((e for e in events if e["event"] == "timeout"
+                            and "screensaver" in e["command"]), None)
+        m = FONT_SIZE_RE.search(screensaver["command"]) if screensaver else None
+        self.font_size = int(m.group(1)) if m else SCREENSAVER_FONT_SIZE
+        for label, doc, matches, command, resume, default in IDLE_TIMEOUTS:
+            current = next((e for e in events if e["event"] == "timeout"
+                            and matches(e["command"])), None)
+            minutes = int(current["seconds"]) / 60 if current else 0
+            subtitle = doc + " 0 turns it off."
+            if command == SCREENSAVER and not Path(SCREENSAVER).expanduser().exists():
+                subtitle += f" Needs {SCREENSAVER}."
+            adjustment = Gtk.Adjustment(value=minutes, lower=0, upper=1440, step_increment=1,
+                                        page_increment=10)
+            row = Adw.SpinRow(title=label, subtitle=subtitle, adjustment=adjustment,
+                              digits=0 if minutes.is_integer() else 1)
+            row.connect("notify::value", self._on_timeout, matches, command, resume)
+            self.widget.add(row)
+            if command == SCREENSAVER:
+                font = Adw.SpinRow(title="Screensaver font size",
+                                   subtitle="Font size in points for the screensaver animation.",
+                                   adjustment=Gtk.Adjustment(value=self.font_size, lower=6,
+                                                             upper=72, step_increment=1,
+                                                             page_increment=4))
+                font.connect("notify::value", self._on_font_size)
+                self.widget.add(font)
+        sleep = Adw.SwitchRow(title="Lock before sleep",
+                              subtitle="Lock the screen when the computer suspends.",
+                              active=any(e["event"] == "before-sleep" and "swaylock" in e["command"]
+                                         for e in events))
+        sleep.connect("notify::active", self._on_sleep)
+        self.widget.add(sleep)
+
+    def _find(self):
+        for line in self.cfg.commands({"exec"}):
+            if line.body.split()[1:2] == ["swayidle"]:
+                return line, _parse_swayidle(line.body)
+        return None, None
+
+    def _edit(self, change):
+        line, parsed = self._find()
+        if line is None:
+            flags, events = ["-w"], []
+        elif parsed is None:
+            return
+        else:
+            flags, events = parsed
+        change(events)
+        if not events:
+            if line is not None:
+                self.cfg.remove_line(line)
+        elif line is None:
+            execs = self.cfg.commands({"exec"})
+            self.cfg.add_line(_format_swayidle(flags, events),
+                              after=execs[-1] if execs else None)
+        else:
+            self.cfg.replace_line(line, _format_swayidle(flags, events))
+        self.on_change()
+
+    def _on_timeout(self, row, _, matches, command, resume):
+        seconds = round(row.get_value() * 60)
+
+        def change(events):
+            index = next((i for i, e in enumerate(events) if e["event"] == "timeout"
+                          and matches(e["command"])), None)
+            if seconds == 0:
+                if index is not None:
+                    del events[index]
+            elif index is not None:
+                events[index]["seconds"] = str(seconds)
+            else:
+                # Keep timeouts in order, ahead of the other events.
+                at = next((i for i, e in enumerate(events) if e["event"] != "timeout"
+                           or int(e["seconds"]) > seconds), len(events))
+                new = self._screensaver_command(command) if command == SCREENSAVER else command
+                events.insert(at, {"event": "timeout", "seconds": str(seconds),
+                                   "command": new, "resume": resume})
+        self._edit(change)
+
+    def _screensaver_command(self, command):
+        command = FONT_SIZE_RE.sub("", command)
+        if self.font_size != SCREENSAVER_FONT_SIZE:
+            command += f" --font-size {self.font_size}"
+        return command
+
+    def _on_font_size(self, row, _):
+        self.font_size = round(row.get_value())
+
+        def change(events):
+            for e in events:
+                if e["event"] == "timeout" and "screensaver" in e["command"]:
+                    e["command"] = self._screensaver_command(e["command"])
+        self._edit(change)
+
+    def _on_sleep(self, row, _):
+        def change(events):
+            events[:] = [e for e in events
+                         if not (e["event"] == "before-sleep" and "swaylock" in e["command"])]
+            if row.get_active():
+                events.append({"event": "before-sleep", "command": LOCK})
+        self._edit(change)
+
+
 class Sway(ConfigApp):
     id = "sway"
     name = "Sway"
@@ -185,6 +374,7 @@ class Sway(ConfigApp):
         ("Keybindings", "input-keyboard-symbolic"),
         ("Window Rules", "view-grid-symbolic"),
         ("Startup", "system-run-symbolic"),
+        ("Idle", "preferences-desktop-screensaver-symbolic"),
         ("Variables", "accessories-text-editor-symbolic"),
     ]
 
@@ -270,6 +460,8 @@ class Sway(ConfigApp):
                            on_change, description="exec_always: runs at startup and after "
                                                   "each config reload."),
             ]
+        elif category == "Idle":
+            groups = [IdleGroup(cfg, on_change)]
         elif category == "Variables":
             groups = [LinesGroup("Variables", cfg, cfg.commands({"set"}), VARIABLE, on_change,
                                  description="Names start with $, e.g. $mod or $term.")]
