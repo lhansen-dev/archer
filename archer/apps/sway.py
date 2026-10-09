@@ -3,8 +3,9 @@
 Sway has no machine-readable option list, so the settings here are curated
 from sway(5), sway-input(5) and sway-output(5). Displays and input devices
 come from the running session via swaymsg. Keybindings, window rules,
-startup commands and variables are edited line by line. The Idle page
-edits the swayidle command started from the config.
+startup commands and variables are edited line by line. The Displays page
+arranges the displays by dragging, and the Idle page edits the swayidle
+command started from the config.
 """
 
 import json
@@ -17,7 +18,8 @@ from pathlib import Path
 
 from gi.repository import Adw, GLib, Gtk
 
-from ..rows import LineSpec, LinesGroup
+from ..arrangement import Arrangement, Display
+from ..rows import LineSpec, LinesGroup, OptionRow
 from ..swayconfig import SwayConfig
 from .base import ConfigApp, Option, Preview
 
@@ -173,6 +175,112 @@ ASSIGN = _regex_spec("assignment", ["Criteria", "Target"],
 VARIABLE = _regex_spec("variable", ["Name", "Value"], r"^set\s+(\$\S+)\s+(.+)$", "set {} {}")
 EXEC = _regex_spec("command", ["Command"], r"^exec\s+(?!--)(.+)$", "exec {}")
 EXEC_ALWAYS = _regex_spec("command", ["Command"], r"^exec_always\s+(.+)$", "exec_always {}")
+
+
+# -- displays -------------------------------------------------------------
+
+MODE_RE = re.compile(r"(\d+)x(\d+)(?:@([\d.]+)Hz)?")
+POSITION_RE = re.compile(r"(-?\d+)(?:px)?\s+(-?\d+)(?:px)?")
+GEOMETRY = ("mode", "scale", "transform", "position")
+# (property, row title) for each display's group, in order
+DISPLAY_ROWS = [("mode", "Resolution"), ("scale", "Scale"), ("transform", "Rotation"),
+                ("position", "Position"), ("adaptive_sync", "Adaptive sync"),
+                ("bg", "Wallpaper")]
+
+
+def _output_label(out):
+    return " ".join(p for p in (out.get("make"), out.get("model")) if p and p != "Unknown")
+
+
+class DisplaysPage:
+    """A drag-to-arrange layout of the connected displays, then their settings."""
+
+    def __init__(self, state, on_change):
+        self.state, self.on_change = state, on_change
+        self.outputs = [o for o in _swaymsg("get_outputs") if o.get("active")]
+        self.rows = {}
+        self.groups = []
+
+        arrange = Adw.PreferencesGroup(
+            title="Arrangement",
+            description="Drag displays to match how they sit on your desk; edges snap "
+                        "together. Applies when you save.")
+        if len(self.outputs) > 1:
+            self.arrangement = Arrangement(self._displays(), self._on_moved)
+            frame = Gtk.Frame(child=self.arrangement)
+            frame.add_css_class("view")
+            arrange.add(frame)
+        else:
+            self.arrangement = None
+            arrange.set_description("Connect another display to arrange them.")
+        self.groups.append(arrange)
+
+        everywhere = Adw.PreferencesGroup(title="All displays")
+        self._add_row(everywhere, "output * bg", "Wallpaper")
+        self._add_row(everywhere, "output * adaptive_sync", "Adaptive sync")
+        self.groups.append(everywhere)
+
+        for out in self.outputs:
+            name = out["name"]
+            group = Adw.PreferencesGroup(title=name, description=_output_label(out))
+            for prop, title in DISPLAY_ROWS:
+                self._add_row(group, f"output {name} {prop}", title)
+            self.groups.append(group)
+
+    def _add_row(self, group, key, title):
+        opt = self.state.by_key.get(key)
+        if opt is None:
+            return
+        row = OptionRow(opt, self.state, self._on_row_changed, title)
+        if not key.startswith("output * "):
+            # The group already names the display; the full doc is behind the info button.
+            if isinstance(row.widget, Adw.EntryRow):
+                row.widget.set_tooltip_text(None)
+            else:
+                row.widget.set_subtitle("")
+        group.add(row.widget)
+        self.rows[key] = row
+
+    def _displays(self):
+        """The displays as the saved-or-pending config will lay them out."""
+        displays = []
+        for out in self.outputs:
+            name = out["name"]
+            user = lambda prop: (self.state.user(f"output {name} {prop}") or [""])[0]
+            current = out.get("current_mode") or {}
+            width, height = current.get("width", 1920), current.get("height", 1080)
+            refresh = current.get("refresh", 60000) / 1000
+            if m := MODE_RE.match(user("mode")):
+                width, height = int(m.group(1)), int(m.group(2))
+                refresh = float(m.group(3)) if m.group(3) else refresh
+            try:
+                scale = float(user("scale") or out.get("scale") or 1)
+            except ValueError:
+                scale = out.get("scale") or 1
+            if (user("transform") or out.get("transform", "normal")).endswith(("90", "270")):
+                width, height = height, width
+            x, y = out["rect"]["x"], out["rect"]["y"]
+            if m := POSITION_RE.fullmatch(user("position")):
+                x, y = int(m.group(1)), int(m.group(2))
+            detail = f"{width}×{height} @ {refresh:.0f} Hz" + (f", {scale:g}×" if scale != 1 else "")
+            displays.append(Display(name, _output_label(out), detail, x, y,
+                                    round(width / scale), round(height / scale)))
+        return displays
+
+    def _on_moved(self, displays):
+        for d in displays:
+            key = f"output {d.name} position"
+            value = f"{d.x} {d.y}"
+            if (self.state.user(key) or [None])[0] != value:
+                self.state.set(key, [value])
+                if key in self.rows:
+                    self.rows[key].refresh()
+        self.on_change()
+
+    def _on_row_changed(self, key):
+        if self.arrangement and key.split()[-1] in GEOMETRY:
+            self.arrangement.set_displays(self._displays())
+        self.on_change()
 
 
 # -- idle (swayidle) ------------------------------------------------------
@@ -406,7 +514,7 @@ class Sway(ConfigApp):
         ]
         for out in _swaymsg("get_outputs"):
             name = out["name"]
-            label = " ".join(p for p in (out.get("make"), out.get("model")) if p and p != "Unknown")
+            label = _output_label(out)
             modes = list(dict.fromkeys(
                 f"{m['width']}x{m['height']}@{m['refresh'] / 1000:.3f}Hz" for m in out.get("modes", [])))
             about = f"{name}" + (f" ({label})" if label else "")
@@ -460,6 +568,8 @@ class Sway(ConfigApp):
                            on_change, description="exec_always: runs at startup and after "
                                                   "each config reload."),
             ]
+        elif category == "Displays":
+            return DisplaysPage(state, on_change).groups
         elif category == "Idle":
             groups = [IdleGroup(cfg, on_change)]
         elif category == "Variables":
