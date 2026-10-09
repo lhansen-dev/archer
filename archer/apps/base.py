@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from ..configfile import KeyValueConfig
+
 
 @dataclass
 class Option:
@@ -50,8 +52,20 @@ class ConfigApp:
     def config_path(self) -> Path:
         raise NotImplementedError
 
+    def open_config(self, path: Path):
+        """The editor for this app's config format (see configfile.py)."""
+        return KeyValueConfig(path)
+
     def load_options(self) -> list[Option]:
         raise NotImplementedError
+
+    def build_page(self, category, state, on_change):
+        """Custom widgets for a category, as a list of Adw.PreferencesGroup.
+
+        Return None to get the standard page of option rows. on_change() must
+        be called after every edit.
+        """
+        return None
 
     def previews(self) -> list[Preview]:
         return []

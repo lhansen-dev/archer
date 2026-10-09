@@ -15,7 +15,6 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from . import __version__  # noqa: E402
 from .apps import available_apps  # noqa: E402
-from .configfile import KeyValueConfig  # noqa: E402
 from .rows import OptionRow, PreviewRow  # noqa: E402
 
 APP_ID = "dev.lhansen.Archer"
@@ -28,10 +27,10 @@ class AppState:
 
     def __init__(self, app):
         self.app = app
+        self.cfg = app.open_config(app.config_path())
         self.options = app.load_options()
         self.by_key = {opt.key: opt for opt in self.options}
         self.previews = app.previews()
-        self.cfg = KeyValueConfig(app.config_path())
 
     def user(self, key):
         return self.cfg.get(key)
@@ -55,12 +54,12 @@ class AppState:
         return not opt.hidden or self.cfg.get(opt.key) is not None
 
     def modified(self):
-        set_keys = set(self.cfg.keys())
-        return [opt for opt in self.options if opt.key in set_keys]
+        return [opt for opt in self.options if self.cfg.get(opt.key) is not None]
 
     def save(self):
         """Validate and write the config. Returns an error message or None."""
-        path = self.cfg.path
+        # Write through symlinks (e.g. a config linked from a dotfiles repo).
+        path = self.cfg.path.resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".archer")
         try:
@@ -224,6 +223,13 @@ class ArcherWindow(Adw.ApplicationWindow):
                     description=f"Options you set in {state.cfg.path} show up here."))
                 return
         else:
+            groups = state.app.build_page(category, state,
+                                          lambda: self._on_option_changed(state, None))
+            if groups is not None:
+                page = self._new_page()
+                for group in groups:
+                    page.add(group)
+                return
             options = [o for o in state.options if o.category == category and state.visible(o)]
 
         page = self._new_page()

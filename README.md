@@ -8,6 +8,15 @@ A personal GTK4/libadwaita tool for tweaking application configs on Arch.
   (docs, defaults, fonts, themes), with live font and color previews. Saving
   validates with `ghostty +validate-config`, keeps a `config.bak`, and reloads
   running Ghostty windows.
+- **Sway**: appearance (gaps, borders, client colors with a preview), behavior,
+  displays and input devices detected from the running session, plus
+  line-by-line editors for keybindings (including modes), window rules,
+  startup commands and variables. Saving validates with `sway -C`, keeps a
+  `config.bak`, and runs `swaymsg reload`.
+
+Edits only rewrite the lines that changed: comments, ordering, blocks and
+column alignment in your config are preserved. Symlinked configs (e.g. from a
+dotfiles repo) are written through the link.
 
 ## Run
 
@@ -18,5 +27,7 @@ Requires `python-gobject`, `gtk4` and `libadwaita`.
 
 ## Adding an app
 
-Subclass `ConfigApp` in `archer/apps/` (see `ghostty.py`), describe its options
-as `Option`s, and add an instance to `ALL_APPS` in `archer/apps/__init__.py`.
+Subclass `ConfigApp` in `archer/apps/` and add an instance to `ALL_APPS` in
+`archer/apps/__init__.py`. `ghostty.py` shows a `key = value` format with
+options discovered from the app; `sway.py` shows a custom config format
+(`open_config`), curated options and custom pages (`build_page`).

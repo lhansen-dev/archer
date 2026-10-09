@@ -252,3 +252,99 @@ class PreviewRow:
             self.label.set_markup(self.preview.render(self.state))
         except (GLib.Error, OSError, ValueError) as e:
             self.label.set_text(f"Preview unavailable: {e}")
+
+
+class LineSpec:
+    """How to show and edit one kind of whole-line entry, e.g. a key binding.
+
+    parse(body) returns the field values, or None for lines it can't show
+    (those are left untouched); format(values) returns the new line body.
+    """
+
+    def __init__(self, noun, fields, parse, format):
+        self.noun, self.fields, self.parse, self.format = noun, fields, parse, format
+
+
+class LinesGroup:
+    """A group with one row per config line, plus add, edit and remove.
+
+    cfg must provide replace_line/remove_line/add_line (see swayconfig.py).
+    """
+
+    def __init__(self, title, cfg, lines, spec, on_change, block=(), description=""):
+        self.cfg, self.spec, self.on_change, self.block = cfg, spec, on_change, block
+        self.lines = []
+        self.widget = Adw.PreferencesGroup(title=title, description=description)
+        add = Gtk.Button(icon_name="list-add-symbolic", valign=Gtk.Align.CENTER,
+                         tooltip_text=f"Add {spec.noun}")
+        add.add_css_class("flat")
+        add.connect("clicked", lambda *_: self._edit(None, None))
+        self.widget.set_header_suffix(add)
+        for line in lines:
+            if (values := spec.parse(line.body)) is not None:
+                self._add_row(line, values)
+
+    def _add_row(self, line, values):
+        row = Adw.ActionRow(activatable=True, use_markup=False)
+        self._label(row, values)
+        remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
+                            tooltip_text=f"Remove {self.spec.noun}")
+        remove.add_css_class("flat")
+        remove.connect("clicked", lambda *_: self._remove(line, row))
+        row.add_suffix(remove)
+        row.connect("activated", lambda *_: self._edit(line, row))
+        self.widget.add(row)
+        self.lines.append(line)
+
+    @staticmethod
+    def _label(row, values):
+        row.set_title(values[0])
+        row.set_subtitle(values[1] if len(values) > 1 else "")
+
+    def _remove(self, line, row):
+        self.cfg.remove_line(line)
+        self.lines.remove(line)
+        self.widget.remove(row)
+        self.on_change()
+
+    def _edit(self, line, row):
+        values = self.spec.parse(line.body) if line else [""] * len(self.spec.fields)
+        verb = "Edit" if line else "Add"
+        dialog = Adw.AlertDialog(heading=f"{verb} {self.spec.noun}")
+        box = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        box.add_css_class("boxed-list")
+        entries = []
+        for field, value in zip(self.spec.fields, values):
+            entry = Adw.EntryRow(title=field, text=value, activates_default=True)
+            box.append(entry)
+            entries.append(entry)
+        box.set_size_request(460, -1)
+        dialog.set_extra_child(box)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("save", "Save" if line else "Add")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("save")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_edit_response, line, row, entries)
+        dialog.present(self.widget)
+        entries[0].grab_focus()
+
+    def _on_edit_response(self, _dialog, response, line, row, entries):
+        values = [e.get_text().strip() for e in entries]
+        if response != "save" or not all(values):
+            return
+        body = self.spec.format(values)
+        if line:
+            # Keep the last field in the same column, so aligned blocks stay aligned.
+            old_last = self.spec.parse(line.body)[-1]
+            column = line.body.rfind(old_last)
+            head = body[:len(body) - len(values[-1])].rstrip()
+            if len(values) > 1 and column > len(head):
+                body = head.ljust(column) + values[-1]
+            self.cfg.replace_line(line, body)
+            self._label(row, values)
+        else:
+            after = self.lines[-1] if self.lines else None
+            new = self.cfg.add_line(body, after=after, block=self.block)
+            self._add_row(new, values)
+        self.on_change()
