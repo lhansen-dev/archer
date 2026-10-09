@@ -348,6 +348,7 @@ class ArcherWindow(Adw.ApplicationWindow):
     def _about(self, *_):
         Adw.AboutDialog(application_name="Archer", application_icon="preferences-system",
                         version=__version__, developer_name="lhansen",
+                        license_type=Gtk.License.MIT_X11,
                         comments="A personal configuration tweaker for Arch applications."
                         ).present(self)
 

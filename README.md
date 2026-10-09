@@ -38,3 +38,7 @@ Subclass `ConfigApp` in `archer/apps/` and add an instance to `ALL_APPS` in
 `archer/apps/__init__.py`. `ghostty.py` shows a `key = value` format with
 options discovered from the app; `sway.py` shows a custom config format
 (`open_config`), curated options and custom pages (`build_page`).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
