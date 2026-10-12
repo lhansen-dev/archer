@@ -11,7 +11,8 @@ A personal GTK4/libadwaita tool for tweaking application configs on Arch.
 - **Sway**: appearance (gaps, borders, client colors with a preview), behavior,
   displays (a drag-to-arrange layout that snaps edges together, plus mode,
   scale, rotation and wallpaper per display) and input devices detected from
-  the running session, plus
+  the running session, a Workspaces page (pick an open app and the workspace
+  it opens on, plus where everything else goes), plus
   line-by-line editors for keybindings (including modes), window rules,
   startup commands and variables, and an Idle page for the swayidle
   timeouts (screensaver and its font size, lock, displays off). Saving validates with `sway -C`, keeps a

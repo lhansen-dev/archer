@@ -4,8 +4,9 @@ Sway has no machine-readable option list, so the settings here are curated
 from sway(5), sway-input(5) and sway-output(5). Displays and input devices
 come from the running session via swaymsg. Keybindings, window rules,
 startup commands and variables are edited line by line. The Displays page
-arranges the displays by dragging, and the Idle page edits the swayidle
-command started from the config.
+arranges the displays by dragging, the Workspaces page picks the workspace
+each app opens on, and the Idle page edits the swayidle command started from
+the config.
 """
 
 import json
@@ -470,6 +471,282 @@ class IdleGroup:
         self._edit(change)
 
 
+# -- workspaces -----------------------------------------------------------
+
+WS_NAME = r'("[^"]*"|[^\s,;]+)'
+# for_window [criteria] move container to workspace D, focus
+ROUTE_RE = re.compile(r"^for_window\s+(\[.*?\])\s+move\s+(?:container\s+|window\s+)?(?:to\s+)?"
+                      rf"workspace\s+(?:number\s+)?{WS_NAME}(\s*,\s*focus)?\s*$")
+# assign [criteria] [→] [workspace] [number] D
+ASSIGN_WS_RE = re.compile(r"^assign\s+(\[.*?\])\s+(?:→\s+)?(?:workspace\s+)?(?:number\s+)?"
+                          rf"{WS_NAME}\s*$")
+WS_COMMAND_RE = re.compile(rf"\bworkspace\s+(?:number\s+)?{WS_NAME}\s*$")
+WS_KEYWORDS = {"next", "prev", "next_on_output", "prev_on_output", "back_and_forth", "current"}
+CRITERION_RE = re.compile(r'^\[\s*(app_id|class)\s*=\s*"([^"]*)"\s*\]$')
+# The "everything else" rule. tiling skips dialogs and other windows that open
+# floating, so they stay with their parent. It must come before the app rules:
+# sway runs every matching for_window rule in config order, so a later app rule
+# moves its windows on again.
+CATCH_ALL = "[tiling]"
+MATCH_KINDS = [("app_id", "Wayland app ID"), ("class", "XWayland class")]
+
+
+def _route(line):
+    """(match, criteria, workspace) for a line that sends windows to a workspace."""
+    body = line.body
+    m = ROUTE_RE.match(body) if body.startswith("for_window") else ASSIGN_WS_RE.match(body)
+    if m and m.group(2) not in WS_KEYWORDS:
+        return m, m.group(1), m.group(2).strip('"')
+    return None
+
+
+def _app_name(value):
+    """A criteria value without its case flag and anchors: (?i)^signal -> signal."""
+    return re.sub(r"^\(\?i\)", "", value).strip("^$")
+
+
+def _app_key(line):
+    """What makes two rules the same app: app_id and class rules for one name
+    (ignoring case) that send it to the same workspace."""
+    _, criteria, workspace = _route(line)
+    if m := CRITERION_RE.match(criteria):
+        return _app_name(m.group(2)).lower(), workspace, line.body.split()[0]
+    return None
+
+
+def _workspace_names(cfg, routes):
+    """Workspaces named in the config or open now; named ones before numbered."""
+    names = []
+    for line in cfg.commands({"bindsym", "bindcode"}) + [l for b in cfg.blocks("mode")
+                                                         for l in cfg.commands({"bindsym"}, b)]:
+        if (m := WS_COMMAND_RE.search(line.body)) and m.group(1) not in WS_KEYWORDS:
+            names.append(m.group(1).strip('"'))
+    names += [ws for _, _, ws in routes] + [w.get("name") for w in _swaymsg("get_workspaces")]
+    names = list(dict.fromkeys(n for n in names if n))
+    return [n for n in names if not n.isdigit()] + sorted((n for n in names if n.isdigit()), key=int)
+
+
+def _format_workspace(name):
+    return f'"{name}"' if " " in name else name
+
+
+def _running_apps():
+    """[(match kind, value)] for the windows open now."""
+    apps = []
+
+    def walk(node):
+        if node.get("pid"):
+            if node.get("app_id"):
+                apps.append(("app_id", node["app_id"]))
+            elif cls := (node.get("window_properties") or {}).get("class"):
+                apps.append(("class", cls))
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            walk(child)
+
+    tree = _swaymsg("get_tree")
+    if tree:
+        walk(tree)
+    return sorted(set(apps), key=lambda a: a[1].lower())
+
+
+class WorkspacesPage:
+    """Which workspace each app opens on, and where everything else goes."""
+
+    def __init__(self, cfg, on_change):
+        self.cfg, self.on_change = cfg, on_change
+        routes = [(line, *_route(line)[1:]) for line in cfg.commands({"for_window", "assign"})
+                  if _route(line)]
+        self.catch_all = next((line for line, criteria, _ in routes if criteria == CATCH_ALL), None)
+        self.routes = [line for line, criteria, _ in routes if criteria != CATCH_ALL]
+        self.workspaces = _workspace_names(cfg, routes)
+
+        self.apps = Adw.PreferencesGroup(
+            title="Apps", description="Open an app's windows on a workspace. Focus follows "
+                                      "the app there.")
+        add = Gtk.Button(icon_name="list-add-symbolic", valign=Gtk.Align.CENTER,
+                         tooltip_text="Add app")
+        add.add_css_class("flat")
+        add.connect("clicked", self._add_dialog)
+        self.apps.set_header_suffix(add)
+        # Most apps have a rule for their Wayland app ID and another for their
+        # XWayland class; show such a pair as one row.
+        rows = {}
+        for line in self.routes:
+            rows.setdefault(_app_key(line) or line, []).append(line)
+        for lines in rows.values():
+            self._add_row(lines)
+
+        self.other = Adw.PreferencesGroup(title="Everything else")
+        model = Gtk.StringList.new(["Where it was opened", *self.workspaces])
+        current = _route(self.catch_all)[2] if self.catch_all else None
+        if current and current not in self.workspaces:
+            model.append(current)
+        self.other_row = Adw.ComboRow(
+            title="Open other apps on", model=model,
+            subtitle="Apps not listed above. Dialogs and other floating windows stay where "
+                     "they open.")
+        if current:
+            self.other_row.set_selected(self._index(model, current))
+        self.other_row.connect("notify::selected", self._on_other)
+        self.other.add(self.other_row)
+        if any(line.body.startswith("assign") for line in self.routes):
+            self.other.set_description("Apps placed with assign are moved here too; "
+                                       "re-add them above to keep them on their workspace.")
+        self.groups = [self.apps, self.other, self._displays_group()]
+
+    def _displays_group(self):
+        group = Adw.PreferencesGroup(
+            title="Displays", description="The display each workspace opens on. Applies "
+                                           "when the workspace is next created.")
+        outputs = [(o["name"], o.get("model") if o.get("model") != "Unknown" else "")
+                   for o in _swaymsg("get_outputs") if o.get("active")]
+        for name in self.workspaces:
+            current = (self.cfg.get(f"workspace {name} output") or [""])[0]
+            choices = [""] + [n for n, _ in outputs]
+            labels = ["Any display"] + [f"{n} · {label}" if label else n for n, label in outputs]
+            if current and current not in choices:
+                choices.append(current)  # e.g. a fallback list, or a display that's unplugged
+                labels.append(current)
+            row = Adw.ComboRow(title=name, model=Gtk.StringList.new(labels), use_markup=False)
+            row.set_selected(choices.index(current))
+            row.connect("notify::selected", self._on_display, name, choices)
+            group.add(row)
+        return group
+
+    def _on_display(self, row, _, name, choices):
+        output = choices[row.get_selected()]
+        self.cfg.set(f"workspace {name} output", [output] if output else None)
+        self.on_change()
+
+    @staticmethod
+    def _index(model, name):
+        return next(i for i in range(model.get_n_items()) if model.get_string(i) == name)
+
+    def _add_row(self, lines):
+        line = lines[0]
+        _, criteria, workspace = _route(line)
+        matches = [CRITERION_RE.match(_route(l)[1]) for l in lines]
+        if all(matches):
+            title = _app_name(matches[0].group(2))
+            kinds = {m.group(1) for m in matches}
+            subtitle = ("Wayland and XWayland" if len(kinds) > 1
+                        else dict(MATCH_KINDS)[kinds.pop()])
+        else:
+            title, subtitle = criteria, ""
+        if line.body.startswith("assign"):
+            subtitle = ", ".join(filter(None, [subtitle, "assign (focus stays put)"]))
+        model = Gtk.StringList.new(self.workspaces)
+        if workspace not in self.workspaces:
+            model.append(workspace)
+        row = Adw.ComboRow(title=title, subtitle=subtitle, model=model, use_markup=False)
+        row.set_selected(self._index(model, workspace))
+        row.connect("notify::selected", self._on_workspace, lines)
+        remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
+                            tooltip_text="Remove")
+        remove.add_css_class("flat")
+        remove.connect("clicked", self._remove, lines, row)
+        row.add_suffix(remove)
+        self.apps.add(row)
+
+    def _set_workspace(self, line, name):
+        m = _route(line)[0]
+        body = line.body
+        self.cfg.replace_line(line, body[:m.start(2)] + _format_workspace(name) + body[m.end(2):])
+
+    def _on_workspace(self, row, _, lines):
+        for line in lines:
+            self._set_workspace(line, row.get_model().get_string(row.get_selected()))
+        self.on_change()
+
+    def _remove(self, _button, lines, row):
+        for line in lines:
+            self.cfg.remove_line(line)
+            self.routes.remove(line)
+        self.apps.remove(row)
+        self.on_change()
+
+    def _on_other(self, row, _):
+        index = row.get_selected()
+        if index == Gtk.INVALID_LIST_POSITION:
+            return
+        if index == 0:
+            if self.catch_all:
+                self.cfg.remove_line(self.catch_all)
+                self.catch_all = None
+        elif self.catch_all:
+            self._set_workspace(self.catch_all, row.get_model().get_string(index))
+        else:
+            body = (f"for_window {CATCH_ALL} move container to workspace "
+                    f"{_format_workspace(row.get_model().get_string(index))}, focus")
+            self.catch_all = self._insert_before_routes(body)
+        self.on_change()
+
+    def _insert_before_routes(self, body):
+        lines = self.cfg.lines
+        if not self.routes:
+            rules = self.cfg.commands({"for_window"})
+            return self.cfg.add_line(body, after=rules[-1] if rules else None)
+        at = lines.index(self.routes[0])
+        if at == 0:
+            line = self.cfg.add_line(body, after=self.routes[0])
+            lines.insert(0, lines.pop(lines.index(line)))
+            return line
+        return self.cfg.add_line(body, after=lines[at - 1])
+
+    def _add_dialog(self, *_):
+        routed = {CRITERION_RE.match(_route(l)[1]).groups()
+                  for l in self.routes if CRITERION_RE.match(_route(l)[1])}
+        running = [a for a in _running_apps() if a not in routed]
+
+        dialog = Adw.AlertDialog(heading="Add app",
+                                 body="Pick an open window, or type its app ID.")
+        box = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        box.add_css_class("boxed-list")
+        pick = Adw.ComboRow(title="Open windows",
+                            model=Gtk.StringList.new(["Choose…"] + [v for _, v in running]))
+        entry = Adw.EntryRow(title="App ID or class", activates_default=True)
+        kind = Adw.ComboRow(title="Match", model=Gtk.StringList.new([l for _, l in MATCH_KINDS]))
+        workspace = Adw.ComboRow(title="Workspace", model=Gtk.StringList.new(self.workspaces))
+
+        def on_pick(row, _):
+            index = row.get_selected()
+            if 0 < index <= len(running):
+                match, value = running[index - 1]
+                entry.set_text(value)
+                kind.set_selected([k for k, _ in MATCH_KINDS].index(match))
+        pick.connect("notify::selected", on_pick)
+        if running:
+            box.append(pick)
+        for row in (entry, kind, workspace):
+            box.append(row)
+        box.set_size_request(460, -1)
+        dialog.set_extra_child(box)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("add", "Add")
+        dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("add")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_add, entry, kind, workspace)
+        dialog.present(self.apps)
+
+    def _on_add(self, _dialog, response, entry, kind, workspace):
+        value = entry.get_text().strip().replace('"', "")
+        if response != "add" or not value or not self.workspaces:
+            return
+        match = MATCH_KINDS[kind.get_selected()][0]
+        name = self.workspaces[workspace.get_selected()]
+        body = (f'for_window [{match}="{value}"] move container to workspace '
+                f"{_format_workspace(name)}, focus")
+        if self.routes:
+            after = self.routes[-1]
+        else:
+            after = self.catch_all or (self.cfg.commands({"for_window"}) or [None])[-1]
+        line = self.cfg.add_line(body, after=after)
+        self.routes.append(line)
+        self._add_row([line])
+        self.on_change()
+
+
 class Sway(ConfigApp):
     id = "sway"
     name = "Sway"
@@ -480,6 +757,7 @@ class Sway(ConfigApp):
         ("Displays", "video-display-symbolic"),
         ("Input", "input-mouse-symbolic"),
         ("Keybindings", "input-keyboard-symbolic"),
+        ("Workspaces", "view-app-grid-symbolic"),
         ("Window Rules", "view-grid-symbolic"),
         ("Startup", "system-run-symbolic"),
         ("Idle", "preferences-desktop-screensaver-symbolic"),
@@ -553,12 +831,17 @@ class Sway(ConfigApp):
                 name = block[0].split(None, 1)[1].strip('"')
                 groups.append(LinesGroup(f"Mode: {name}", cfg, cfg.commands({"bindsym"}, block),
                                          BINDING, on_change, block=block))
+        elif category == "Workspaces":
+            return WorkspacesPage(cfg, on_change).groups
         elif category == "Window Rules":
+            unrouted = lambda lines: [l for l in lines if not _route(l)]
             groups = [
-                LinesGroup("Window rules", cfg, cfg.commands({"for_window"}), WINDOW_RULE,
-                           on_change, description="Run a command when a matching window opens."),
-                LinesGroup("Assignments", cfg, cfg.commands({"assign"}), ASSIGN, on_change,
-                           description="Open matching windows on a workspace or output."),
+                LinesGroup("Window rules", cfg, unrouted(cfg.commands({"for_window"})),
+                           WINDOW_RULE, on_change,
+                           description="Run a command when a matching window opens. Rules "
+                                       "that move apps to a workspace are under Workspaces."),
+                LinesGroup("Assignments", cfg, unrouted(cfg.commands({"assign"})), ASSIGN,
+                           on_change, description="Open matching windows on an output."),
             ]
         elif category == "Startup":
             groups = [
