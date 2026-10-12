@@ -114,12 +114,24 @@ EXTRA = {
         "format-disconnected": ("text", "Format when disconnected.", ""),
         "interface": ("text", "Interface to show, e.g. `wlan0`.", ""),
     },
+    "custom": {
+        "exec": ("text", "Command whose output the module shows.", ""),
+        "exec-if": ("text", "Only run `exec` when this command succeeds.", ""),
+        "return-type": ("text", "`json` to read text, tooltip, class and percentage from the "
+                        "command's output; leave empty for plain text.", ""),
+        "restart-interval": ("number", "Seconds to wait before restarting `exec` after it "
+                             "exits, for commands that keep running.", ""),
+        "states › warning": ("number", "Percentage at or above which `warning` applies "
+                             "(needs `return-type` json).", ""),
+        "states › critical": ("number", "Percentage at or above which `critical` applies "
+                              "(needs `return-type` json).", ""),
+    },
     "sway/workspaces": {
         "all-outputs": ("bool", "Show workspaces from every output, not just this one.", "false"),
         "disable-scroll": ("bool", "Don't switch workspaces by scrolling over the bar.", "false"),
     },
 }
-NO_INTERVAL = ("sway/", "hyprland/", "niri/", "tray", "custom/")
+NO_INTERVAL = ("sway/", "hyprland/", "niri/", "tray")
 
 MODULE_ICONS = {
     "clock": "preferences-system-time-symbolic",
@@ -323,7 +335,10 @@ class Waybar(ConfigApp):
         specs = dict(COMMON)
         if module.startswith(NO_INTERVAL):
             specs.pop("interval")
-        specs.update(EXTRA.get(module.split("#")[0], {}))
+        base = module.split("#")[0]
+        if base.startswith("custom/"):
+            base = "custom"
+        specs.update(EXTRA.get(base, {}))
 
         # Everything already in the config, flattened to leaf keys.
         node = cfg._node(module)
@@ -345,7 +360,7 @@ class Waybar(ConfigApp):
         for local, (kind, doc, default) in specs.items():
             key = f"{module}{SEP}{local}"
             if not doc:
-                doc = f"`{local}` for the {module} module. See waybar-{module.split('/')[-1].split('#')[0]}(5)."
+                doc = f"`{local}` for the {module} module. See waybar-{base.split('/')[-1]}(5)."
             o = Option(key=key, doc=doc, defaults=[default], kind=kind, category=module, label=local)
             if kind == "number":
                 o.maximum = 1e6
