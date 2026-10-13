@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from gi.repository import Adw, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from ..arrangement import Arrangement, Display
 from ..rows import LineSpec, LinesGroup, OptionRow
@@ -187,6 +187,19 @@ GEOMETRY = ("mode", "scale", "transform", "position")
 DISPLAY_ROWS = [("mode", "Resolution"), ("scale", "Scale"), ("transform", "Rotation"),
                 ("position", "Position"), ("adaptive_sync", "Adaptive sync"),
                 ("bg", "Wallpaper")]
+BG_MODES = ["fill", "fit", "stretch", "center", "tile", "solid_color"]
+
+
+def _split_bg(value):
+    """`<file> <mode> [fallback]` as a list; sway accepts quoted paths with spaces."""
+    try:
+        return shlex.split(value)
+    except ValueError:  # half-typed quote
+        return value.split()
+
+
+def _join_bg(parts):
+    return " ".join(f'"{p}"' if " " in p else p for p in parts)
 
 
 def _output_label(out):
@@ -239,8 +252,56 @@ class DisplaysPage:
                 row.widget.set_tooltip_text(None)
             else:
                 row.widget.set_subtitle("")
+        if key.endswith(" bg") and isinstance(row.widget, Adw.EntryRow):
+            self._add_bg_controls(row.widget)
         group.add(row.widget)
         self.rows[key] = row
+
+    def _add_bg_controls(self, entry):
+        """A mode dropdown and an image picker that rewrite the entry's text."""
+        modes = Gtk.DropDown.new_from_strings(BG_MODES)
+        modes.set_valign(Gtk.Align.CENTER)
+        modes.set_tooltip_text("How the image fills the display")
+        pick = Gtk.Button(icon_name="document-open-symbolic", valign=Gtk.Align.CENTER,
+                          tooltip_text="Choose image")
+        pick.add_css_class("flat")
+
+        # Each side writes only when it differs, so the two can't ping-pong.
+        def sync(*_):
+            parts = _split_bg(entry.get_text())
+            if len(parts) > 1 and parts[1] in BG_MODES:
+                modes.set_selected(BG_MODES.index(parts[1]))
+
+        def on_mode(*_):
+            parts = _split_bg(entry.get_text())
+            mode = BG_MODES[modes.get_selected()]
+            if parts and parts[1:2] != [mode]:
+                parts[1:2] = [mode]
+                entry.set_text(_join_bg(parts))
+
+        def on_picked(dialog, result):
+            try:
+                path = dialog.open_finish(result).get_path()
+            except GLib.Error:  # cancelled
+                return
+            parts = _split_bg(entry.get_text())
+            mode = parts[1] if len(parts) > 1 and parts[1] != "solid_color" else "fill"
+            entry.set_text(_join_bg([path, mode, *parts[2:]]))
+
+        def on_pick(*_):
+            images = Gtk.FileFilter(name="Images")
+            images.add_mime_type("image/*")
+            filters = Gio.ListStore.new(Gtk.FileFilter)
+            filters.append(images)
+            Gtk.FileDialog(title="Choose wallpaper", filters=filters).open(
+                entry.get_root(), None, on_picked)
+
+        entry.connect("changed", sync)
+        modes.connect("notify::selected", on_mode)
+        pick.connect("clicked", on_pick)
+        sync()
+        entry.add_suffix(modes)
+        entry.add_suffix(pick)
 
     def _displays(self):
         """The displays as the saved-or-pending config will lay them out."""
