@@ -4,6 +4,17 @@ A personal GTK4/libadwaita tool for tweaking application configs on Arch.
 
 ## Supported apps
 
+- **RGB Lighting** (requires `openrgb`): detects lighting controllers, with a
+  shared color for all devices, per-device colors and effects, and per-zone
+  color overrides for motherboard headers, fans and strips. Settings are
+  saved in `~/.config/archer/rgb.conf` and applied through OpenRGB when saving;
+  they are not automatically restored at login. Device support and available
+  effects depend on OpenRGB. Configure addressable header LED counts in
+  OpenRGB first if needed. Restart Archer after changing connected hardware.
+  OpenRGB 1.1 is recommended: it fixes concurrent hardware writes and dropped
+  CLI updates that can cause wrong GPU colors in 1.0. To use an AppImage,
+  set **RGB Lighting → OpenRGB → OpenRGB executable** to its full path, then
+  restart Archer. Both discovery and lighting updates use that executable.
 - **Ghostty**: every option, read straight from the installed `ghostty` binary
   (docs, defaults, fonts, themes), with live font and color previews. Saving
   validates with `ghostty +validate-config`, keeps a `config.bak`, and reloads
