@@ -445,6 +445,8 @@ class IdleGroup:
                                         page_increment=10)
             row = Adw.SpinRow(title=label, subtitle=subtitle, adjustment=adjustment,
                               digits=0 if minutes.is_integer() else 1)
+            if current:  # keep a hand-edited resume, like an extra wake-up step, across 0 and back
+                resume = current["resume"]
             row.connect("notify::value", self._on_timeout, matches, command, resume)
             self.widget.add(row)
             if command == SCREENSAVER:
