@@ -402,6 +402,11 @@ def _parse_swayidle(body):
     return flags, events
 
 
+def _swayidle_line(cfg):
+    return next((line for line in cfg.commands({"exec"})
+                 if line.body.split()[1:2] == ["swayidle"]), None)
+
+
 def _format_swayidle(flags, events):
     parts = [" ".join(["exec swayidle", *flags])]
     for e in events:
@@ -423,7 +428,7 @@ class IdleGroup:
         self.cfg, self.on_change = cfg, on_change
         self.widget = Adw.PreferencesGroup(
             title="Idle", description="Edits the swayidle command under Startup. "
-                                      "Takes effect the next time you log in.")
+                                      "Saving restarts swayidle.")
         line, parsed = self._find()
         if line is not None and parsed is None:
             self.widget.set_description("The swayidle command under Startup couldn't be "
@@ -465,10 +470,8 @@ class IdleGroup:
         self.widget.add(sleep)
 
     def _find(self):
-        for line in self.cfg.commands({"exec"}):
-            if line.body.split()[1:2] == ["swayidle"]:
-                return line, _parse_swayidle(line.body)
-        return None, None
+        line = _swayidle_line(self.cfg)
+        return line, _parse_swayidle(line.body) if line else None
 
     def _edit(self, change):
         line, parsed = self._find()
@@ -834,7 +837,14 @@ class Sway(ConfigApp):
         return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sway" / "config"
 
     def open_config(self, path):
-        return SwayConfig(path, fallback="/etc/sway/config")
+        cfg = SwayConfig(path, fallback="/etc/sway/config")
+        self._idle = self._idle_body(cfg)
+        return cfg
+
+    @staticmethod
+    def _idle_body(cfg):
+        line = _swayidle_line(cfg)
+        return line.body if line else None
 
     def load_options(self, cfg):
         options = []
@@ -959,6 +969,13 @@ class Sway(ConfigApp):
         return None
 
     def apply(self):
-        if subprocess.run(["swaymsg", "reload"], capture_output=True).returncode == 0:
-            return "Saved and reloaded Sway"
-        return "Saved Sway config"
+        reloaded = subprocess.run(["swaymsg", "reload"], capture_output=True).returncode == 0
+        # exec only runs at login, so restart swayidle by hand when its line changed.
+        idle = self._idle_body(SwayConfig(self.config_path()))
+        if idle != self._idle:
+            subprocess.run(["pkill", "-x", "swayidle"], capture_output=True)
+            if idle:
+                subprocess.run(["swaymsg", "exec", shlex.join(shlex.split(idle)[1:])],
+                               capture_output=True)
+            self._idle = idle
+        return "Saved and reloaded Sway" if reloaded else "Saved Sway config"
