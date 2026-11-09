@@ -6,7 +6,7 @@ come from the running session via swaymsg. Keybindings, window rules,
 startup commands and variables are edited line by line. The Displays page
 arranges the displays by dragging, the Workspaces page picks the workspace
 each app opens on, and the Idle page edits the swayidle command started from
-the config.
+the config. A night light group on the Displays page edits the wlsunset command.
 """
 
 import json
@@ -240,6 +240,7 @@ class DisplaysPage:
             for prop, title in DISPLAY_ROWS:
                 self._add_row(group, f"output {name} {prop}", title)
             self.groups.append(group)
+        self.groups.append(NightLightGroup(state.cfg, on_change).widget)
 
     def _add_row(self, group, key, title):
         opt = self.state.by_key.get(key)
@@ -535,6 +536,109 @@ class IdleGroup:
             if row.get_active():
                 events.append({"event": "before-sleep", "command": LOCK})
         self._edit(change)
+
+
+# -- night light (wlsunset) -----------------------------------------------
+
+TIME_RE = re.compile(r"([01]?\d|2[0-3]):[0-5]\d")
+# (flag, label, doc, default) for wlsunset's fixed-time mode; see wlsunset(1)
+NIGHT_TIMES = [("-S", "Sunrise", "When the screen warms back to daytime, as HH:MM.", "07:00"),
+               ("-s", "Sunset", "When the screen turns warmer, as HH:MM.", "20:00")]
+NIGHT_TEMP = 4000  # wlsunset's default night temperature
+
+
+def _wlsunset_args(cfg):
+    """(line, args after `exec wlsunset`), (None, None) if absent, or (line, None) if unparsable."""
+    line = next((l for l in cfg.commands({"exec"}) if l.body.split()[1:2] == ["wlsunset"]), None)
+    if line is None:
+        return None, None
+    try:
+        return line, shlex.split(line.body)[2:]
+    except ValueError:
+        return line, None
+
+
+def _set_flag(args, flag, value):
+    """Set `flag value` in a flag/value argument list, or drop it when value is None."""
+    args = list(args)
+    if flag in args[:-1]:
+        i = args.index(flag)
+        del args[i:i + 2]
+    if value is not None:
+        args += [flag, value]
+    return args
+
+
+class NightLightGroup:
+    """Turns `exec wlsunset` on and off and edits its schedule and warmth."""
+
+    def __init__(self, cfg, on_change):
+        self.cfg, self.on_change = cfg, on_change
+        self.widget = Adw.PreferencesGroup(
+            title="Night light", description="Warms the screen colors at night with wlsunset. "
+                                             "Saving restarts it.")
+        if not shutil.which("wlsunset"):
+            self.widget.set_description("Install wlsunset to use a night light.")
+            return
+        line, args = _wlsunset_args(cfg)
+        if line is not None and args is None:
+            self.widget.set_description("The wlsunset command under Startup couldn't be "
+                                        "parsed; edit it there.")
+            return
+        # Remember the flags so turning it off and on again keeps them.
+        self.args = args or ["-S", "07:00", "-s", "20:00"]
+        flag = lambda f, default: (self.args[self.args.index(f) + 1]
+                                   if f in self.args[:-1] else default)
+
+        switch = Adw.SwitchRow(title="Night light", active=line is not None)
+        switch.connect("notify::active", self._on_switch)
+        self.widget.add(switch)
+        for f, label, doc, default in NIGHT_TIMES:
+            row = Adw.EntryRow(title=label, text=flag(f, default), tooltip_text=doc,
+                               show_apply_button=True)
+            row.connect("apply", self._on_time, f)
+            self.widget.add(row)
+        temp = Adw.SpinRow(title="Night warmth",
+                           subtitle="Color temperature at night in kelvin. Lower is warmer; "
+                                    "daytime is 6500.",
+                           adjustment=Gtk.Adjustment(value=int(flag("-t", NIGHT_TEMP)),
+                                                     lower=1000, upper=6000, step_increment=100,
+                                                     page_increment=500))
+        temp.connect("notify::value", self._on_temp)
+        self.widget.add(temp)
+        self.switch = switch
+
+    def _write(self):
+        line, _ = _wlsunset_args(self.cfg)
+        body = shlex.join(["exec", "wlsunset", *self.args])
+        if not self.switch.get_active():
+            if line is not None:
+                self.cfg.remove_line(line)
+        elif line is None:
+            execs = self.cfg.commands({"exec"})
+            self.cfg.add_line(body, after=execs[-1] if execs else None)
+        else:
+            self.cfg.replace_line(line, body)
+        self.on_change()
+
+    def _on_switch(self, *_):
+        self._write()
+
+    def _on_time(self, row, f):
+        value = row.get_text().strip()
+        if not TIME_RE.fullmatch(value):
+            row.add_css_class("error")
+            return
+        row.remove_css_class("error")
+        self.args = _set_flag(self.args, f, value)
+        # Fixed times replace a location-based schedule.
+        self.args = _set_flag(_set_flag(self.args, "-l", None), "-L", None)
+        self._write()
+
+    def _on_temp(self, row, _):
+        value = round(row.get_value())
+        self.args = _set_flag(self.args, "-t", None if value == NIGHT_TEMP else str(value))
+        self._write()
 
 
 # -- workspaces -----------------------------------------------------------
@@ -838,13 +942,14 @@ class Sway(ConfigApp):
 
     def open_config(self, path):
         cfg = SwayConfig(path, fallback="/etc/sway/config")
-        self._idle = self._idle_body(cfg)
+        self._daemons = self._daemon_bodies(cfg)
         return cfg
 
     @staticmethod
-    def _idle_body(cfg):
-        line = _swayidle_line(cfg)
-        return line.body if line else None
+    def _daemon_bodies(cfg):
+        """The `exec` lines of the daemons Archer edits, which a reload doesn't restart."""
+        idle, (sunset, _) = _swayidle_line(cfg), _wlsunset_args(cfg)
+        return {"swayidle": idle and idle.body, "wlsunset": sunset and sunset.body}
 
     def load_options(self, cfg):
         options = []
@@ -970,12 +1075,13 @@ class Sway(ConfigApp):
 
     def apply(self):
         reloaded = subprocess.run(["swaymsg", "reload"], capture_output=True).returncode == 0
-        # exec only runs at login, so restart swayidle by hand when its line changed.
-        idle = self._idle_body(SwayConfig(self.config_path()))
-        if idle != self._idle:
-            subprocess.run(["pkill", "-x", "swayidle"], capture_output=True)
-            if idle:
-                subprocess.run(["swaymsg", "exec", shlex.join(shlex.split(idle)[1:])],
-                               capture_output=True)
-            self._idle = idle
+        # exec only runs at login, so restart a daemon by hand when its line changed.
+        bodies = self._daemon_bodies(SwayConfig(self.config_path()))
+        for name, body in bodies.items():
+            if body != self._daemons[name]:
+                subprocess.run(["pkill", "-x", name], capture_output=True)
+                if body:
+                    subprocess.run(["swaymsg", "exec", shlex.join(shlex.split(body)[1:])],
+                                   capture_output=True)
+        self._daemons = bodies
         return "Saved and reloaded Sway" if reloaded else "Saved Sway config"
